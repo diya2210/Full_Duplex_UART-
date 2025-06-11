@@ -1,76 +1,60 @@
 // UART Transmitter
 // ==========================
 
-module uart_tx #(
-    parameter CLK_PER_BIT = 434
-)(
-    input wire clk,
-    input wire rst,
-    input wire tx_start,
-    input wire [7:0] data_in,
-    output reg tx = 1'b1,
-    output reg busy = 1'b0
+module transmitter(
+    input wire [7:0] din,        // 8-bit input data to transmit
+    input wire wr_en,            // Write enable signal
+    input wire clk_50m,          // 50 MHz system clock
+    input wire clken,            // Clock enable (baud rate generator output)
+    output reg tx,               // Serial output line
+    output wire tx_busy          // Indicates transmission is in progress
 );
-
-    localparam IDLE = 0, START = 1, DATA = 2, STOP = 3;
-
-    reg [1:0] state = IDLE;
-    reg [7:0] data_reg;
-    reg [2:0] bit_idx = 0;
-    reg [15:0] clk_cnt = 0;
-
-    always @(posedge clk or posedge rst) begin
-        if (rst) begin
-            state <= IDLE;
-            tx <= 1'b1;
-            busy <= 0;
-            bit_idx <= 0;
-            clk_cnt <= 0;
-        end else begin
-            case (state)
-                IDLE: begin
-                    tx <= 1'b1;
-                    busy <= 0;
-                    if (tx_start) begin
-                        state <= START;
-                        data_reg <= data_in;
-                        busy <= 1;
-                        clk_cnt <= 0;
-                    end
-                end
-                START: begin
-                    tx <= 1'b0;  // Start bit
-                    if (clk_cnt == CLK_PER_BIT - 1) begin
-                        clk_cnt <= 0;
-                        state <= DATA;
-                        bit_idx <= 0;
-                    end else begin
-                        clk_cnt <= clk_cnt + 1;
-                    end
-                end
-                DATA: begin
-                    tx <= data_reg[bit_idx];
-                    if (clk_cnt == CLK_PER_BIT - 1) begin
-                        clk_cnt <= 0;
-                        if (bit_idx == 7)
-                            state <= STOP;
-                        else
-                            bit_idx <= bit_idx + 1;
-                    end else begin
-                        clk_cnt <= clk_cnt + 1;
-                    end
-                end
-                STOP: begin
-                    tx <= 1'b1;  // Stop bit
-                    if (clk_cnt == CLK_PER_BIT - 1) begin
-                        clk_cnt <= 0;
-                        state <= IDLE;
-                        busy <= 0;
-                    end else begin
-                        clk_cnt <= clk_cnt + 1;
-                    end
-                end
-            endcase
+initial begin
+    tx = 1'b1;                   // Default UART line is idle high
+end
+// Define UART transmission states
+parameter STATE_IDLE = 2'b00;
+parameter STATE_START = 2'b01;
+parameter STATE_DATA = 2'b10;
+parameter STATE_STOP = 2'b11;
+reg [7:0] data = 8'h00;         // Register to hold data to be transmitted
+reg [2:0] bitpos = 3'h0;        // Bit position counter (0 to 7)
+reg [1:0] state = STATE_IDLE;   // Current state of the transmitter FSM
+always @(posedge clk_50m) begin
+    case (state)
+    STATE_IDLE: begin
+        if (wr_en) begin
+            state <= STATE_START;   // Go to start bit state
+            data <= din;            // Load data to transmit
+            bitpos <= 3'h0;         // Reset bit position
         end
     end
+    STATE_START: begin
+        if (clken) begin
+            tx <= 1'b0;             // Send start bit (low)
+            state <= STATE_DATA;    // Go to data transmission state
+        end
+    end
+    STATE_DATA: begin
+        if (clken) begin
+            tx <= data[bitpos];     // Send data bit at current bitpos
+            if (bitpos == 3'h7)
+                state <= STATE_STOP; // After last bit, go to stop bit
+            else
+                bitpos <= bitpos + 3'h1; // Move to next bit
+        end
+    end
+    STATE_STOP: begin
+        if (clken) begin
+            tx <= 1'b1;             // Send stop bit (high)
+            state <= STATE_IDLE;    // Return to idle state
+        end
+    end
+    default: begin
+        tx <= 1'b1;                 // Default to idle line high
+        state <= STATE_IDLE;
+    end
+    endcase
+end
+assign tx_busy = (state != STATE_IDLE); // High when transmitting
 endmodule
