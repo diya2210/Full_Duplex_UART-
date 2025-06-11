@@ -1,71 +1,74 @@
 // UART Receiver
 // ==========================
 
-module uart_rx #(
-    parameter CLK_PER_BIT = 434
-)(
-    input wire clk,
-    input wire rst,
-    input wire rx,
-    output reg [7:0] data_out,
-    output reg data_valid = 0
+module receiver(
+    input wire rx,               // Serial input line
+    input wire rdy_clr,          // Ready clear signal (acknowledge read)
+    input wire clk_50m,          // 50 MHz clock
+    input wire clken,            // Baud rate sample enable
+    output reg rdy,              // High when data byte is received
+    output reg [7:0] data        // Received data output
 );
+initial begin
+    rdy = 0;
+    data = 8'b0;
+end
+// FSM states for receiver
+parameter RX_STATE_START = 2'b00;
+parameter RX_STATE_DATA  = 2'b01;
+parameter RX_STATE_STOP  = 2'b10;
+reg [1:0] state = RX_STATE_START; // Current state
+reg [3:0] sample = 0;             // Sample counter
+reg [3:0] bitpos = 0;             // Bit position counter
+reg [7:0] scratch = 8'b0;         // Temporary storage for incoming bits
+always @(posedge clk_50m) begin
+    if (rdy_clr)
+        rdy <= 0;                 // Clear ready flag
 
-    localparam IDLE = 0, START = 1, DATA = 2, STOP = 3;
+    if (clken) begin
+        case (state)
+        RX_STATE_START: begin
+            // Wait for falling edge (start bit)
+            if (!rx || sample != 0)
+                sample <= sample + 4'b1;
 
-    reg [1:0] state = IDLE;
-    reg [15:0] clk_cnt = 0;
-    reg [2:0] bit_idx = 0;
-    reg [7:0] data_buf;
-
-    always @(posedge clk or posedge rst) begin
-        if (rst) begin
-            state <= IDLE;
-            clk_cnt <= 0;
-            bit_idx <= 0;
-            data_valid <= 0;
-            data_out <= 8'b0;
-        end else begin
-            case (state)
-                IDLE: begin
-                    data_valid <= 0;
-                    if (rx == 0) begin  // Start bit detected
-                        state <= START;
-                        clk_cnt <= 0;
-                    end
-                end
-                START: begin
-                    if (clk_cnt == CLK_PER_BIT - 1) begin
-                        clk_cnt <= 0;
-                        state <= DATA;
-                        bit_idx <= 0;
-                    end else begin
-                        clk_cnt <= clk_cnt + 1;
-                    end
-                end
-                DATA: begin
-                    if (clk_cnt == CLK_PER_BIT - 1) begin
-                        clk_cnt <= 0;
-                        data_buf[bit_idx] <= rx;
-                        if (bit_idx == 7)
-                            state <= STOP;
-                        else
-                            bit_idx <= bit_idx + 1;
-                    end else begin
-                        clk_cnt <= clk_cnt + 1;
-                    end
-                end
-                STOP: begin
-                    if (clk_cnt == CLK_PER_BIT - 1) begin
-                        data_out <= data_buf;
-                        data_valid <= 1;
-                        state <= IDLE;
-                        clk_cnt <= 0;
-                    end else begin
-                        clk_cnt <= clk_cnt + 1;
-                    end
-                end
-            endcase
+            // If low is stable for a full bit time, start receiving
+            if (sample == 15) begin
+                state <= RX_STATE_DATA;
+                bitpos <= 0;
+                sample <= 0;
+                scratch <= 0;
+            end
         end
+        RX_STATE_DATA: begin
+            sample <= sample + 4'b1;
+
+            // Sample in the middle of bit time
+            if (sample == 4'h8) begin
+                scratch[bitpos[2:0]] <= rx; // Store sampled bit
+                bitpos <= bitpos + 4'b1;
+            end
+
+            // After receiving all 8 bits
+            if (bitpos == 8 && sample == 15)
+                state <= RX_STATE_STOP;
+        end
+        RX_STATE_STOP: begin
+            // Wait for stop bit (line high) or allow transition
+            if (sample == 15 || (sample >= 8 && !rx)) begin
+                state <= RX_STATE_START;
+                data <= scratch;      // Transfer scratch to output
+                rdy <= 1'b1;          // Set ready flag
+                sample <= 0;
+            end else begin
+                sample <= sample + 4'b1;
+            end
+        end
+        default: begin
+            state <= RX_STATE_START;
+        end
+        endcase
     end
+end
+
 endmodule
